@@ -1,6 +1,6 @@
 use std::{
     io::{ErrorKind, Read, Write},
-    net::TcpListener,
+    net::{TcpListener, TcpStream},
     sync::mpsc,
     thread,
 };
@@ -18,15 +18,17 @@ fn main() {
         .set_nonblocking(true)
         .expect("Failed to initialize non-blocking");
 
-    let mut clients = vec![];
-    let (tx, rx) = mpsc::channel::<String>();
+    let mut clients: Vec<(std::net::SocketAddr, TcpStream)> = vec![];
+
+    let (tx, rx) = mpsc::channel::<(std::net::SocketAddr, String)>();
 
     loop {
         if let Ok((mut socket, addr)) = server.accept() {
             println!("Client {} connected", addr);
 
             let tx = tx.clone();
-            clients.push(socket.try_clone().expect("Failed to clone client"));
+
+            clients.push((addr, socket.try_clone().expect("Failed to clone client")));
 
             thread::spawn(move || {
                 loop {
@@ -38,7 +40,8 @@ fn main() {
                             let msg = String::from_utf8(msg).expect("Invalid utf8 message");
 
                             println!("{}: {:?}", addr, msg);
-                            tx.send(msg).expect("Failed to send msg to rx");
+
+                            tx.send((addr, msg)).expect("Failed to send msg to rx");
                         }
                         Err(ref err) if err.kind() == ErrorKind::WouldBlock => (),
                         Err(_) => {
@@ -52,16 +55,17 @@ fn main() {
             });
         }
 
-        if let Ok(msg) = rx.try_recv() {
-            clients = clients
-                .into_iter()
-                .filter_map(|mut client| {
-                    let mut buff = msg.clone().into_bytes();
-                    buff.resize(MSG_SIZE, 0);
+        if let Ok((sender_addr, msg)) = rx.try_recv() {
+            clients.retain_mut(|(_, client)| {
+                let mut buff = msg.clone().into_bytes();
+                buff.resize(MSG_SIZE, 0);
 
-                    client.write_all(&buff).map(|_| client).ok()
-                })
-                .collect::<Vec<_>>();
+                if client.peer_addr().unwrap() != sender_addr {
+                    client.write_all(&buff).is_ok()
+                } else {
+                    true
+                }
+            });
         }
 
         sleep();
